@@ -1,7 +1,17 @@
 import AppKit
 
-/// A small on-screen bar shown on the screen whose brightness just changed.
+/// A small on-screen bar on each screen whose brightness just changed.
 final class BrightnessHUD {
+    private var panels: [CGDirectDisplayID: HUDPanel] = [:]
+
+    func show(_ value: Float, on screen: NSScreen) {
+        let panel = panels[screen.displayID] ?? HUDPanel()
+        panels[screen.displayID] = panel
+        panel.show(value, on: screen)
+    }
+}
+
+private final class HUDPanel {
     private let panel: NSPanel
     private let bar = SegmentBar()
     private var hideWork: DispatchWorkItem?

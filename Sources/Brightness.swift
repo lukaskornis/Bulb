@@ -98,6 +98,10 @@ enum BuiltInBrightness {
     private static let handle = dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_NOW)
     private static let getter: Getter? = symbol("DisplayServicesGetBrightness")
     private static let setter: Setter? = symbol("DisplayServicesSetBrightness")
+    private static let register: Register? = symbol("DisplayServicesRegisterForBrightnessChangeNotifications")
+    private typealias Register = @convention(c) (CGDirectDisplayID, UnsafeRawPointer?, CFNotificationCallback) -> Int32
+    private static var changeHandler: (() -> Void)?
+    private static var observedDisplays: Set<CGDirectDisplayID> = []
 
     static func get(_ id: CGDirectDisplayID) -> Float? {
         guard let getter else { return nil }
@@ -107,6 +111,16 @@ enum BuiltInBrightness {
 
     static func set(_ id: CGDirectDisplayID, _ value: Float) {
         _ = setter?(id, value)
+    }
+
+    /// Fires for any change: system keys, Control Center, auto-brightness, or Bulb itself.
+    static func observeChanges(_ id: CGDirectDisplayID, _ handler: @escaping () -> Void) {
+        changeHandler = handler
+        guard let register, !observedDisplays.contains(id) else { return }
+        observedDisplays.insert(id)
+        _ = register(id, nil) { _, _, _, _, _ in
+            DispatchQueue.main.async { BuiltInBrightness.changeHandler?() }
+        }
     }
 
     private static func symbol<T>(_ name: String) -> T? {

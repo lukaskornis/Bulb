@@ -1,4 +1,5 @@
 import AppKit
+import os
 import ServiceManagement
 
 /// A menu row with an icon and a slider. Menu items with custom views draw their own padding.
@@ -33,33 +34,38 @@ private final class SliderRow: NSView {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
-    private let keyTap = BrightnessKeyTap()
     private let hud = BrightnessHUD()
-    private var screens: [Screen] = []
+    private let group = ScreenGroup()
     private var allRow: SliderRow?
     private var reloadWork: DispatchWorkItem?
 
-    private static let step: Float = 1.0 / 16
-    private static let fineStep: Float = 1.0 / 64
+    private static let ownWriteTolerance: Float = 0.001
+    private static let fadeSettleSeconds = 0.3
+    private static let log = Logger(subsystem: "local.bulb", category: "keys")
+    private var fadeStart: (builtIn: Float, target: Screen)?
+    private var fadeWork: DispatchWorkItem?
     private static let screenChangeSettleSeconds = 1.0
+    private static let keysChangeAllScreensKey = "keysChangeAllScreens"
+    private static let keepRatiosKey = "keepRatios"
+
+    private var keysChangeAllScreens: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.keysChangeAllScreensKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.keysChangeAllScreensKey) }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        statusItem.button?.image = NSImage(systemSymbolName: "lightbulb.fill", accessibilityDescription: "Bulb")
-        menu.delegate = self
-        statusItem.menu = menu
+        UserDefaults.standard.register(defaults: [Self.keysChangeAllScreensKey: true, Self.keepRatiosKey: false])
+        group.keepsRatios = UserDefaults.standard.bool(forKey: Self.keepRatiosKey)
 
-        keyTap.handler = { [weak self] press in self?.handleKey(press) ?? false }
-        keyTap.start()
-        if !keyTap.isRunning { requestAccessibility() }
+        statusItem.button?.image = BulbIcon.image()
+        menu.delegate = self
+        menu.autoenablesItems = false
+        statusItem.menu = menu
 
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             self?.scheduleScreenReload()
-        }
-        DistributedNotificationCenter.default().addObserver(forName: NSNotification.Name("com.apple.accessibility.api"), object: nil, queue: .main) { [weak self] _ in
-            // The trust list is written just after this notification fires.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.retryKeyTap() }
         }
 
         rebuildMenu()
@@ -68,28 +74,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: Keys
 
-    private func handleKey(_ press: BrightnessKeyTap.Press) -> Bool {
+    /// macOS handles the brightness keys inside the keyboard driver, so no app ever sees them.
+    /// Bulb reacts to the built-in screen's change instead and passes the step on.
+    private func builtInChangedElsewhere() {
+        guard let builtIn = group.screens.first(where: \.isBuiltIn),
+              let value = BuiltInBrightness.get(builtIn.id) else { return }
+        let previous = builtIn.brightness
+        // Bulb's own writes update the model first, so they arrive here already matching.
+        guard abs(value - previous) > Self.ownWriteTolerance else { return }
+        Self.log.info("Built-in changed \(previous, privacy: .public) -> \(value, privacy: .public)")
+
+        let delta = value - previous
+        if keysChangeAllScreens {
+            builtIn.reload()
+            group.follow(builtIn, delta: delta)
+            showHUD(for: group.controllable.filter { !$0.isBuiltIn })
+            return
+        }
+        if fadeStart == nil {
+            guard let target = externalUnderMouse() else {
+                builtIn.reload()
+                group.captureRatios()
+                return
+            }
+            fadeStart = (previous, target)
+        }
+        // macOS fades to the new value in several steps; putting it back mid-fade loses to the fade.
+        fadeWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.moveFadeToTarget() }
+        fadeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.fadeSettleSeconds, execute: work)
+    }
+
+    private func moveFadeToTarget() {
+        guard let start = fadeStart, let builtIn = group.screens.first(where: \.isBuiltIn),
+              let value = BuiltInBrightness.get(builtIn.id) else { return }
+        fadeStart = nil
+        let delta = value - start.builtIn
+        Self.log.info("Follow mouse: built-in \(start.builtIn, privacy: .public) -> \(value, privacy: .public), \(start.target.name, privacy: .public) \(start.target.brightness, privacy: .public) + \(delta, privacy: .public)")
+        builtIn.set(start.builtIn)
+        start.target.set(start.target.brightness + delta)
+        group.captureRatios()
+        showHUD(for: [start.target])
+    }
+
+    private func externalUnderMouse() -> Screen? {
         let mouse = NSEvent.mouseLocation
-        guard let nsScreen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }),
-              let screen = screens.first(where: { $0.id == nsScreen.displayID }),
-              !screen.isBuiltIn, screen.isControllable else { return false }
-        guard press.isKeyDown else { return true }
-
-        let step = press.isFine ? Self.fineStep : Self.step
-        let snapped = (screen.brightness / step).rounded() + (press.isUp ? 1 : -1)
-        screen.set(snapped * step)
-        hud.show(screen.brightness, on: nsScreen)
-        return true
+        guard let nsScreen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) else { return nil }
+        return group.controllable.first { $0.id == nsScreen.displayID && !$0.isBuiltIn }
     }
 
-    private func requestAccessibility() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
-    }
-
-    private func retryKeyTap() {
-        keyTap.start()
-        rebuildMenu()
+    private func showHUD(for screens: [Screen]) {
+        for nsScreen in NSScreen.screens {
+            guard let screen = screens.first(where: { $0.id == nsScreen.displayID }) else { continue }
+            hud.show(screen.brightness, on: nsScreen)
+        }
     }
 
     // MARK: Screens
@@ -103,50 +142,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func reloadScreens() {
         ScreenCatalog.load { [weak self] screens in
-            self?.screens = screens
-            self?.rebuildMenu()
+            guard let self else { return }
+            self.group.screens = screens
+            if let builtIn = screens.first(where: \.isBuiltIn) {
+                BuiltInBrightness.observeChanges(builtIn.id) { [weak self] in self?.builtInChangedElsewhere() }
+            }
+            self.rebuildMenu()
         }
-    }
-
-    private var averageBrightness: Float {
-        let controllable = screens.filter(\.isControllable)
-        guard !controllable.isEmpty else { return 1 }
-        return controllable.map(\.brightness).reduce(0, +) / Float(controllable.count)
     }
 
     // MARK: Menu
 
     func menuWillOpen(_ menu: NSMenu) {
-        screens.forEach { $0.reload() }
-        statusItem.menu?.items.first(where: { $0.action == #selector(toggleLaunchAtLogin) })?.state = launchAtLoginState
+        group.screens.forEach { $0.reload() }
+        menu.items.first(where: { $0.action == #selector(toggleLaunchAtLogin) })?.state = launchAtLoginState
     }
 
     private func rebuildMenu() {
         menu.removeAllItems()
 
-        let all = SliderRow(symbol: "sun.max.fill", tooltip: "All screens", value: averageBrightness,
-                            enabled: screens.contains(where: \.isControllable))
-        all.onChange = { [weak self] value in self?.screens.filter(\.isControllable).forEach { $0.set(value) } }
+        let all = SliderRow(symbol: "sun.max.fill", tooltip: "All screens", value: group.level, enabled: !group.controllable.isEmpty)
+        all.onChange = { [weak self] value in self?.group.setLevel(value) }
         allRow = all
         menu.addItem(viewItem(all))
         menu.addItem(.separator())
 
-        for screen in screens {
+        for screen in group.screens {
             let symbol = screen.isBuiltIn ? "laptopcomputer" : "display"
             let tooltip = screen.isControllable ? screen.name : "\(screen.name): no brightness control"
             let row = SliderRow(symbol: symbol, tooltip: tooltip, value: screen.brightness, enabled: screen.isControllable)
-            row.onChange = { [weak screen] value in screen?.set(value) }
+            row.onChange = { [weak self, weak screen] value in
+                screen?.set(value)
+                self?.group.captureRatios()
+            }
             screen.onBrightnessChange = { [weak self, weak row] value in
                 row?.slider.floatValue = value
-                if let self { self.allRow?.slider.floatValue = self.averageBrightness }
+                if let self { self.allRow?.slider.floatValue = self.group.level }
             }
             menu.addItem(viewItem(row))
         }
         menu.addItem(.separator())
 
-        if !keyTap.isRunning {
-            menu.addItem(withTitle: "Allow Brightness Keys…", action: #selector(openAccessibilitySettings), keyEquivalent: "").target = self
+        let allScreens = NSMenuItem(title: "Keys Change All Screens", action: #selector(toggleKeysChangeAllScreens), keyEquivalent: "")
+        allScreens.target = self
+        allScreens.state = keysChangeAllScreens ? .on : .off
+        menu.addItem(allScreens)
+        if keysChangeAllScreens {
+            let ratios = NSMenuItem(title: "Keep Brightness Ratios", action: #selector(toggleKeepRatios), keyEquivalent: "")
+            ratios.target = self
+            ratios.state = group.keepsRatios ? .on : .off
+            ratios.indentationLevel = 1
+            menu.addItem(ratios)
         }
+        menu.addItem(.separator())
+
         let login = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         login.target = self
         login.state = launchAtLoginState
@@ -160,10 +209,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
-    @objc private func openAccessibilitySettings() {
-        requestAccessibility()
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
-        NSWorkspace.shared.open(url)
+    @objc private func toggleKeysChangeAllScreens() {
+        keysChangeAllScreens.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func toggleKeepRatios() {
+        group.keepsRatios.toggle()
+        UserDefaults.standard.set(group.keepsRatios, forKey: Self.keepRatiosKey)
+        rebuildMenu()
     }
 
     private var launchAtLoginState: NSControl.StateValue {
