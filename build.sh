@@ -34,7 +34,7 @@ swiftc -O Sources/*.swift -o "$BUNDLE/Contents/MacOS/$APP" -framework AppKit -fr
 cp Info.plist "$BUNDLE/Contents/Info.plist"
 
 security find-identity -p codesigning | grep -q "\"$IDENTITY\"" || make_identity
-codesign --force --sign "$IDENTITY" "$BUNDLE"
+codesign --force --options runtime --entitlements Bulb.entitlements --sign "$IDENTITY" "$BUNDLE"
 
 if [[ "${1:-}" == "install" ]]; then
   pkill -x "$APP" || true

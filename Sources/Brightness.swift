@@ -9,6 +9,9 @@ private func IOAVServiceCreateWithService(_ allocator: CFAllocator?, _ service: 
 @_silgen_name("IOAVServiceReadI2C")
 private func IOAVServiceReadI2C(_ service: IOAVService, _ chipAddress: UInt32, _ offset: UInt32, _ buffer: UnsafeMutableRawPointer, _ length: UInt32) -> IOReturn
 
+@_silgen_name("IOAVServiceCopyEDID")
+private func IOAVServiceCopyEDID(_ service: IOAVService, _ edid: UnsafeMutablePointer<Unmanaged<CFData>?>) -> IOReturn
+
 @_silgen_name("IOAVServiceWriteI2C")
 private func IOAVServiceWriteI2C(_ service: IOAVService, _ chipAddress: UInt32, _ offset: UInt32, _ buffer: UnsafeMutableRawPointer, _ length: UInt32) -> IOReturn
 
@@ -57,29 +60,27 @@ enum DDC {
         bytes.reduce(displayAddress ^ hostAddress, ^)
     }
 
-    /// Each external DCPAVServiceProxy follows its framebuffer's DisplayAttributes in registry order,
-    /// which is how the service gets paired with an EDID identity.
+    /// Identity comes from each monitor's own EDID; the sandbox hides the registry's DisplayAttributes.
     static func externalServices() -> [ExternalService] {
         var iterator = io_iterator_t()
-        guard IORegistryCreateIterator(kIOMainPortDefault, kIOServicePlane, IOOptionBits(kIORegistryIterateRecursively), &iterator) == KERN_SUCCESS else { return [] }
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("DCPAVServiceProxy"), &iterator) == KERN_SUCCESS else { return [] }
         defer { IOObjectRelease(iterator) }
 
         var services: [ExternalService] = []
-        var lastAttributes: [String: Any] = [:]
         while case let entry = IOIteratorNext(iterator), entry != 0 {
             defer { IOObjectRelease(entry) }
-            if let attributes = property(entry, "DisplayAttributes") as? [String: Any],
-               let product = attributes["ProductAttributes"] as? [String: Any] {
-                lastAttributes = product
+            guard property(entry, "Location") as? String == "External",
+                  let service = IOAVServiceCreateWithService(kCFAllocatorDefault, entry)?.takeRetainedValue() else { continue }
+            var edidRef: Unmanaged<CFData>?
+            let edid = IOAVServiceCopyEDID(service, &edidRef) == kIOReturnSuccess ? edidRef?.takeRetainedValue() as Data? : nil
+            guard let edid, edid.count >= 16 else {
+                services.append(ExternalService(vendor: 0, model: 0, serial: 0, service: service))
                 continue
             }
-            guard IOObjectConformsTo(entry, "DCPAVServiceProxy") != 0,
-                  property(entry, "Location") as? String == "External",
-                  let service = IOAVServiceCreateWithService(kCFAllocatorDefault, entry)?.takeRetainedValue() else { continue }
             services.append(ExternalService(
-                vendor: (lastAttributes["LegacyManufacturerID"] as? NSNumber)?.uint32Value ?? 0,
-                model: (lastAttributes["ProductID"] as? NSNumber)?.uint32Value ?? 0,
-                serial: (lastAttributes["SerialNumber"] as? NSNumber)?.uint32Value ?? 0,
+                vendor: UInt32(edid[8]) << 8 | UInt32(edid[9]),
+                model: UInt32(edid[10]) | UInt32(edid[11]) << 8,
+                serial: UInt32(edid[12]) | UInt32(edid[13]) << 8 | UInt32(edid[14]) << 16 | UInt32(edid[15]) << 24,
                 service: service))
         }
         return services

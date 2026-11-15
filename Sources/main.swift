@@ -42,10 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var reloadWork: DispatchWorkItem?
 
     private static let ownWriteTolerance: Float = 0.001
-    private static let fadeSettleSeconds = 0.3
     private static let log = Logger(subsystem: "local.bulb", category: "keys")
-    private var fadeStart: (builtIn: Float, target: Screen)?
-    private var fadeWork: DispatchWorkItem?
     private static let screenChangeSettleSeconds = 1.0
     private static let keysChangeAllScreensKey = "keysChangeAllScreens"
     private static let keepRatiosKey = "keepRatios"
@@ -75,7 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Keys
 
     /// macOS handles the brightness keys inside the keyboard driver, so no app ever sees them.
-    /// Bulb reacts to the built-in screen's change instead and passes the step on.
+    /// Bulb reacts to the built-in screen's change instead and passes the step on to the others.
     private func builtInChangedElsewhere() {
         guard let builtIn = group.screens.first(where: \.isBuiltIn),
               let value = BuiltInBrightness.get(builtIn.id) else { return }
@@ -84,44 +81,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard abs(value - previous) > Self.ownWriteTolerance else { return }
         Self.log.info("Built-in changed \(previous, privacy: .public) -> \(value, privacy: .public)")
 
-        let delta = value - previous
-        if keysChangeAllScreens {
-            builtIn.reload()
-            group.follow(builtIn, delta: delta)
-            showHUD(for: group.controllable.filter { !$0.isBuiltIn })
+        builtIn.reload()
+        guard keysChangeAllScreens else {
+            group.captureRatios()
             return
         }
-        if fadeStart == nil {
-            guard let target = externalUnderMouse() else {
-                builtIn.reload()
-                group.captureRatios()
-                return
-            }
-            fadeStart = (previous, target)
-        }
-        // macOS fades to the new value in several steps; putting it back mid-fade loses to the fade.
-        fadeWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.moveFadeToTarget() }
-        fadeWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.fadeSettleSeconds, execute: work)
-    }
-
-    private func moveFadeToTarget() {
-        guard let start = fadeStart, let builtIn = group.screens.first(where: \.isBuiltIn),
-              let value = BuiltInBrightness.get(builtIn.id) else { return }
-        fadeStart = nil
-        let delta = value - start.builtIn
-        Self.log.info("Follow mouse: built-in \(start.builtIn, privacy: .public) -> \(value, privacy: .public), \(start.target.name, privacy: .public) \(start.target.brightness, privacy: .public) + \(delta, privacy: .public)")
-        builtIn.set(start.builtIn)
-        start.target.set(start.target.brightness + delta)
-        group.captureRatios()
-        showHUD(for: [start.target])
-    }
-
-    private func externalUnderMouse() -> Screen? {
-        let mouse = NSEvent.mouseLocation
-        guard let nsScreen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) else { return nil }
-        return group.controllable.first { $0.id == nsScreen.displayID && !$0.isBuiltIn }
+        group.follow(builtIn, delta: value - previous)
+        showHUD(for: group.controllable.filter { !$0.isBuiltIn })
     }
 
     private func showHUD(for screens: [Screen]) {
