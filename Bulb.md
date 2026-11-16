@@ -32,3 +32,6 @@ Menu bar app (light bulb icon) that sets brightness on every screen, built-in an
 
 ## Build
 `./build.sh` builds and signs with the fixed "Bulb Local Signing" identity (created once in the login keychain). `./build.sh install` copies to /Applications and opens it.
+
+## Screenshots
+`./screenshots/render.sh` draws the README images offscreen from the app's own views with made-up screens. No window is shown and the real screen is never captured.
