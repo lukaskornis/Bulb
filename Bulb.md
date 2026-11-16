@@ -35,3 +35,8 @@ Menu bar app (light bulb icon) that sets brightness on every screen, built-in an
 
 ## Screenshots
 `./screenshots/render.sh` draws the README images offscreen from the app's own views with made-up screens. No window is shown and the real screen is never captured.
+
+## Release
+1. Bump `CFBundleShortVersionString` in `Info.plist`, then `./build.sh`.
+2. `ditto -c -k --keepParent build/Bulb.app Bulb-<version>.zip` and `gh release create v<version> Bulb-<version>.zip`.
+3. In the `lukaskornis/homebrew-tap` repo, set `version` and `sha256` (`shasum -a 256` of the zip) in `Casks/bulb.rb`, then push.

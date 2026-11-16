@@ -22,16 +22,25 @@ Anyone with an Apple Silicon Mac and an external monitor who is tired of two bri
 Tested daily on an M1 MacBook Air with a Dell monitor on macOS 15. Monitors are dimmed over DDC, the same channel their own buttons use. Most monitors support it; some TVs, docks and adapters don't, and those show a greyed-out slider.
 
 ## Install
-You need macOS 13 or newer and Apple's command line tools (run `xcode-select --install` if you don't have them).
+On an Apple Silicon Mac with macOS 13 or newer and [Homebrew](https://brew.sh):
+```bash
+brew install --cask lukaskornis/tap/bulb
+```
+That's it. Look for the bulb in the menu bar, and turn on Launch at Login in its menu to keep it around.
+
+The app is signed with a local certificate, not notarized by Apple (that needs a paid developer account), so the cask clears the download flag after install. Otherwise macOS would refuse to open it with "Apple could not verify".
+
+To get updates with a plain `brew upgrade`, trust the tap once: `brew trust lukaskornis/tap`. To remove: `brew uninstall --cask bulb`.
+
+### Or build it yourself
+You need Apple's command line tools (run `xcode-select --install` if you don't have them).
 ```bash
 git clone https://github.com/lukaskornis/Bulb && cd Bulb
 ./build.sh install
 ```
-That builds the app, copies it to Applications and opens it. Look for the bulb in the menu bar, and tick Launch at Login in its menu to keep it around.
+That builds the app, copies it to Applications and opens it. The first build makes a local signing certificate, "Bulb Local Signing", in your login keychain, so macOS sees every rebuild as the same app.
 
-The first build makes a local signing certificate, "Bulb Local Signing", in your login keychain, so macOS sees every rebuild as the same app.
-
-Update with `git pull && ./build.sh install`. To remove it, pick Quit in its menu and delete Bulb from Applications.
+Update with `git pull && ./build.sh install`. To remove a self-built copy, pick Quit in its menu and delete Bulb from Applications.
 
 ## Good to know
 - Bulb uses private Apple APIs for the laptop screen and for DDC, so a macOS update could break it.
